@@ -16,16 +16,17 @@ package cmd
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/mail"
-	"net/smtp"
 	"os"
 	"os/user"
+	"path"
+	"regexp"
 	"strings"
 
 	"github.com/axllent/mailpit/config"
-	"github.com/axllent/mailpit/utils/logger"
-	"github.com/reiver/go-telnet"
+	"github.com/axllent/mailpit/internal/logger"
+	"github.com/mneis/go-telnet"
 	flag "github.com/spf13/pflag"
 )
 
@@ -34,7 +35,6 @@ var (
 	SMTPAddr = "localhost:1025"
 	// FromAddr email address
 	FromAddr string
-
 	// UseB - used to set from `-bs`
 	UseB bool
 	// UseS - used to set from `-bs`
@@ -42,15 +42,19 @@ var (
 )
 
 func init() {
+	// ensure only valid characters are used, ie: windows
+	re := regexp.MustCompile(`[^a-zA-Z\-\.\_]`)
 	host, err := os.Hostname()
 	if err != nil {
 		host = "localhost"
+	} else {
+		host = re.ReplaceAllString(host, "-")
 	}
 
 	username := "nobody"
 	user, err := user.Current()
 	if err == nil && user != nil && len(user.Username) > 0 {
-		username = user.Username
+		username = re.ReplaceAllString(user.Username, "-")
 	}
 
 	if FromAddr == "" {
@@ -62,7 +66,7 @@ func init() {
 func Run() {
 	var recipients []string
 
-	// defaults from envars if provided
+	// defaults from env vars if provided
 	if len(os.Getenv("MP_SENDMAIL_SMTP_ADDR")) > 0 {
 		SMTPAddr = os.Getenv("MP_SENDMAIL_SMTP_ADDR")
 	}
@@ -78,6 +82,9 @@ func Run() {
 	flag.BoolP("long-i", "i", false, "Ignored")
 	flag.BoolP("long-o", "o", false, "Ignored")
 	flag.BoolP("long-t", "t", false, "Ignored")
+	flag.StringP("from-name", "F", "", "Ignored")
+	flag.StringP("bits", "B", "", "Ignored")
+	flag.StringP("errors", "e", "", "Ignored")
 
 	// set the default help
 	flag.Usage = func() {
@@ -93,6 +100,11 @@ func Run() {
 	// allow recipients to be passed as an argument
 	recipients = flag.Args()
 
+	// if run via `mailpit sendmail ...` then remove `sendmail` from "recipients"
+	if len(recipients) > 0 && recipients[0] == "sendmail" {
+		recipients = recipients[1:]
+	}
+
 	if showHelp {
 		flag.Usage()
 		os.Exit(0)
@@ -104,20 +116,29 @@ func Run() {
 		os.Exit(1)
 	}
 
+	socketAddr, isSocket := socketAddress(SMTPAddr)
+
 	// handles `sendmail -bs`
+	// telnet directly to SMTP
 	if UseB && UseS {
 		var caller telnet.Caller = telnet.StandardCaller
 
-		// telnet directly to SMTP
-		if err := telnet.DialToAndCall(SMTPAddr, caller); err != nil {
-			fmt.Println(err)
-			os.Exit(1)
+		if isSocket {
+			if err := telnet.DialToAndCallUnix(socketAddr, caller); err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
+		} else {
+			if err := telnet.DialToAndCall(SMTPAddr, caller); err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
 		}
 
 		return
 	}
 
-	body, err := ioutil.ReadAll(os.Stdin)
+	body, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error reading stdin")
 		os.Exit(11)
@@ -125,7 +146,7 @@ func Run() {
 
 	msg, err := mail.ReadMessage(bytes.NewReader(body))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, fmt.Sprintf("error parsing message body: %s", err))
+		fmt.Fprintf(os.Stderr, "error parsing message body: %si\n", err)
 		os.Exit(11)
 	}
 
@@ -152,8 +173,13 @@ func Run() {
 		}
 	}
 
-	err = smtp.SendMail(SMTPAddr, nil, FromAddr, addresses, body)
+	from, err := mail.ParseAddress(FromAddr)
 	if err != nil {
+		fmt.Fprintln(os.Stderr, "invalid from address")
+		os.Exit(11)
+	}
+
+	if err := Send(SMTPAddr, from.Address, addresses, body); err != nil {
 		fmt.Fprintln(os.Stderr, "error sending mail")
 		logger.Log().Fatal(err)
 	}
@@ -175,5 +201,22 @@ Flags:
   -i          Ignored
   -o          Ignored
   -v          Ignored
+  -F  string  Ignored
+  -B  string  Ignored
+  -e  string  Ignored
 `, config.Version, strings.Join(args, " "), FromAddr)
+}
+
+// SocketAddress returns a path and a FileMode if the address is in
+// the format of unix:<path>
+func socketAddress(address string) (string, bool) {
+	re := regexp.MustCompile(`^unix:(.*)$`)
+
+	if !re.MatchString(address) {
+		return "", false
+	}
+
+	m := re.FindAllStringSubmatch(address, 1)
+
+	return path.Clean(m[0][1]), true
 }

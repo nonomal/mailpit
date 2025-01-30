@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/axllent/mailpit/config"
-	"github.com/axllent/mailpit/utils/logger"
+	"github.com/axllent/mailpit/internal/auth"
+	"github.com/axllent/mailpit/internal/logger"
 	"github.com/gorilla/websocket"
 )
 
@@ -22,14 +22,10 @@ const (
 
 	// Send pings to peer with this period. Must be less than pongWait.
 	pingPeriod = (pongWait * 9) / 10
-
-	// Maximum message size allowed from peer.
-	maxMessageSize = 512
 )
 
 var (
 	newline = []byte{'\n'}
-	space   = []byte{' '}
 
 	// MessageHub global
 	MessageHub *Hub
@@ -53,7 +49,24 @@ type Client struct {
 	send chan []byte
 }
 
-// writePump pumps messages from the hub to the websocket connection.
+// ReadPump is used here solely to monitor the connection, not to actually receive messages.
+func (c *Client) readPump() {
+	defer func() {
+		c.hub.unregister <- c
+	}()
+
+	for {
+		_, _, err := c.conn.NextReader()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				logger.Log().Errorf("[websocket] error: %v", err.Error())
+			}
+			break
+		}
+	}
+}
+
+// WritePump pumps messages from the hub to the websocket connection.
 //
 // A goroutine running writePump is started for each connection. The
 // application ensures that there is at most one writer to a connection by
@@ -62,7 +75,7 @@ func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
-		_ = c.conn.Close()
+		c.hub.unregister <- c
 	}()
 	for {
 		select {
@@ -99,33 +112,31 @@ func (c *Client) writePump() {
 
 // ServeWs handles websocket requests from the peer.
 func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
-	if config.UIAuthFile != "" {
-		if config.UIAuthFile != "" {
-			user, pass, ok := r.BasicAuth()
+	if auth.UICredentials != nil {
+		user, pass, ok := r.BasicAuth()
 
-			if !ok {
-				basicAuthResponse(w)
-				return
-			}
+		if !ok {
+			basicAuthResponse(w)
+			return
+		}
 
-			if !config.UIAuth.Match(user, pass) {
-				basicAuthResponse(w)
-				return
-			}
+		if !auth.UICredentials.Match(user, pass) {
+			basicAuthResponse(w)
+			return
 		}
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		logger.Log().Error(err)
+		logger.Log().Errorf("[websocket] %s", err.Error())
 		return
 	}
 
 	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256)}
 	client.hub.register <- client
 
-	// Allow collection of memory referenced by the caller by doing all work in
-	// new goroutines.
+	// Allow collection of memory referenced by the caller by doing all work in new goroutines.
+	go client.readPump()
 	go client.writePump()
 }
 

@@ -1,13 +1,11 @@
-// Copyright 2013 The Gorilla WebSocket Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
+// Package websockets is used to broadcast messages to connected clients
 package websockets
 
 import (
 	"encoding/json"
+	"time"
 
-	"github.com/axllent/mailpit/utils/logger"
+	"github.com/axllent/mailpit/internal/logger"
 )
 
 // Hub maintains the set of active clients and broadcasts messages to the
@@ -47,14 +45,17 @@ func (h *Hub) Run() {
 	for {
 		select {
 		case client := <-h.register:
-			h.Clients[client] = true
+			if _, ok := h.Clients[client]; !ok {
+				logger.Log().Debugf("[websocket] client %s connected", client.conn.RemoteAddr().String())
+				h.Clients[client] = true
+			}
 		case client := <-h.unregister:
 			if _, ok := h.Clients[client]; ok {
+				logger.Log().Debugf("[websocket] client %s disconnected", client.conn.RemoteAddr().String())
 				delete(h.Clients, client)
 				close(client.send)
 			}
 		case message := <-h.Broadcast:
-			// logger.Log().Debugf("[broadcast] %s", message)
 			for client := range h.Clients {
 				select {
 				case client.send <- message:
@@ -69,7 +70,7 @@ func (h *Hub) Run() {
 
 // Broadcast will spawn a broadcast message to all connected clients
 func Broadcast(t string, msg interface{}) {
-	if MessageHub == nil {
+	if MessageHub == nil || len(MessageHub.Clients) == 0 {
 		return
 	}
 
@@ -79,8 +80,30 @@ func Broadcast(t string, msg interface{}) {
 	b, err := json.Marshal(w)
 
 	if err != nil {
-		logger.Log().Errorf("[http] broadcast received invalid data: %s", err)
+		logger.Log().Errorf("[websocket] broadcast received invalid data: %s", err.Error())
+		return
 	}
 
+	// add a very small delay to prevent broadcasts from being interpreted
+	// as a multi-line messages (eg: storage.DeleteMessages() which can send a very quick series)
+	time.Sleep(time.Millisecond)
+
 	go func() { MessageHub.Broadcast <- b }()
+}
+
+// BroadCastClientError is a wrapper to broadcast client errors to the web UI
+func BroadCastClientError(severity, errorType, ip, message string) {
+	msg := struct {
+		Level   string
+		Type    string
+		IP      string
+		Message string
+	}{
+		severity,
+		errorType,
+		ip,
+		message,
+	}
+
+	Broadcast("error", msg)
 }

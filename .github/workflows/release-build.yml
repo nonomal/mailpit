@@ -5,7 +5,7 @@ on:
 name: Build & release
 jobs:
   releases-matrix:
-    name: Release Go Binary
+    name: Build
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -21,10 +21,10 @@ jobs:
           - goarch: arm
             goos: windows
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     # build the assets
-    - uses: actions/setup-node@v3
+    - uses: actions/setup-node@v4
       with:
         node-version: 18
         cache: 'npm'
@@ -33,7 +33,7 @@ jobs:
     - run: npm run package
 
     # build the binaries
-    - uses: wangyoucao577/go-release-action@v1.38
+    - uses: wangyoucao577/go-release-action@v1
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         goos: ${{ matrix.goos }}
@@ -44,4 +44,5 @@ jobs:
         extra_files: LICENSE README.md
         md5sum: false
         overwrite: true
+        retry: 5
         ldflags: -w -X "github.com/axllent/mailpit/config.Version=${{ github.ref_name }}"

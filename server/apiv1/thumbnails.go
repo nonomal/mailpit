@@ -10,11 +10,11 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/axllent/mailpit/storage"
-	"github.com/axllent/mailpit/utils/logger"
-	"github.com/disintegration/imaging"
+	"github.com/axllent/mailpit/internal/logger"
+	"github.com/axllent/mailpit/internal/storage"
 	"github.com/gorilla/mux"
 	"github.com/jhillyerd/enmime"
+	"github.com/kovidgoyal/imaging"
 )
 
 var (
@@ -22,35 +22,41 @@ var (
 	thumbHeight = 120
 )
 
+// swagger:parameters ThumbnailParams
+type thumbnailParams struct {
+	// Message database ID or "latest"
+	//
+	// in: path
+	// required: true
+	ID string
+
+	// Attachment part ID
+	//
+	// in: path
+	// required: true
+	PartID string
+}
+
 // Thumbnail returns a thumbnail image for an attachment (images only)
 func Thumbnail(w http.ResponseWriter, r *http.Request) {
-	// swagger:route GET /api/v1/message/{ID}/part/{PartID}/thumb message Thumbnail
+	// swagger:route GET /api/v1/message/{ID}/part/{PartID}/thumb message ThumbnailParams
 	//
 	// # Get an attachment image thumbnail
 	//
 	// This will return a cropped 180x120 JPEG thumbnail of an image attachment.
 	// If the image is smaller than 180x120 then the image is padded. If the attachment is not an image then a blank image is returned.
 	//
+	// The ID can be set to `latest` to return the latest message.
+	//
 	//	Produces:
-	//	- image/jpeg
+	//	  - image/jpeg
 	//
 	//	Schemes: http, https
 	//
-	//	Parameters:
-	//	  + name: ID
-	//	    in: path
-	//	    description: Database ID
-	//	    required: true
-	//	    type: string
-	//	  + name: PartID
-	//	    in: path
-	//	    description: Attachment part ID
-	//	    required: true
-	//	    type: string
-	//
 	//	Responses:
-	//		200: BinaryResponse
-	//		default: ErrorResponse
+	//	  200: BinaryResponse
+	//    400: ErrorResponse
+
 	vars := mux.Vars(r)
 
 	id := vars["id"]
@@ -74,10 +80,10 @@ func Thumbnail(w http.ResponseWriter, r *http.Request) {
 
 	buf := bytes.NewBuffer(a.Content)
 
-	img, err := imaging.Decode(buf)
+	img, err := imaging.Decode(buf, imaging.AutoOrientation(true))
 	if err != nil {
 		// it's not an image, return default
-		logger.Log().Warning(err)
+		logger.Log().Warnf("[image] %s", err.Error())
 		blankImage(a, w)
 		return
 	}
@@ -99,7 +105,7 @@ func Thumbnail(w http.ResponseWriter, r *http.Request) {
 	dst = imaging.OverlayCenter(dst, dstImageFill, 1.0)
 
 	if err := jpeg.Encode(foo, dst, &jpeg.Options{Quality: 70}); err != nil {
-		logger.Log().Warning(err)
+		logger.Log().Warnf("[image] %s", err.Error())
 		blankImage(a, w)
 		return
 	}
@@ -114,13 +120,13 @@ func blankImage(a *enmime.Part, w http.ResponseWriter) {
 	rect := image.Rect(0, 0, thumbWidth, thumbHeight)
 	img := image.NewRGBA(rect)
 	background := color.RGBA{255, 255, 255, 255}
-	draw.Draw(img, img.Bounds(), &image.Uniform{background}, image.ZP, draw.Src)
+	draw.Draw(img, img.Bounds(), &image.Uniform{background}, image.Point{}, draw.Src)
 	var b bytes.Buffer
 	foo := bufio.NewWriter(&b)
 	dstImageFill := imaging.Fill(img, thumbWidth, thumbHeight, imaging.Center, imaging.Lanczos)
 
 	if err := jpeg.Encode(foo, dstImageFill, &jpeg.Options{Quality: 70}); err != nil {
-		logger.Log().Warning(err)
+		logger.Log().Warnf("[image] %s", err.Error())
 	}
 
 	fileName := a.FileName
